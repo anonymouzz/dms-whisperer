@@ -6,6 +6,7 @@ import qs.Common
 import qs.Services
 import qs.Widgets
 import qs.Modules.Plugins
+import "./whisper-prompt.mjs" as WhisperPrompt
 
 PluginComponent {
     id: root
@@ -71,6 +72,7 @@ PluginComponent {
     property bool typeText: true
     property bool copyText: true
     property bool soundCues: true
+    property string initialPrompt: ""
     property var customWords: []
     property var snippets: []
     property string aiProvider: "openrouter"   // "openrouter" | "google"
@@ -260,13 +262,9 @@ PluginComponent {
             .filter(w => w.length > 0)
     }
 
-    // Custom vocabulary is fed to whisper as an initial prompt, which biases
-    // decoding toward these spellings. Snippet triggers are included so they
-    // transcribe verbatim and match.
-    readonly property string vocabPrompt: {
-        const words = vocabWords()
-        return words.length > 0 ? "Glossary: " + words.join(", ") + "." : ""
-    }
+    // Whisper treats --prompt as prior transcript context; keep vocabulary
+    // entries free of language-specific prefixes so all languages behave alike.
+    readonly property string vocabPrompt: WhisperPrompt.formatVocabPrompt(initialPrompt, vocabWords())
 
     // Overlay state
     readonly property bool overlayActive: sttState === "preparing" || sttState === "recording" || sttState === "stopping" || sttState === "cancelling" || sttState === "transcribing" || sttState === "polishing"
@@ -301,6 +299,7 @@ PluginComponent {
         typeText = PluginService.loadPluginData(whispererId, "typeText", true)
         copyText = PluginService.loadPluginData(whispererId, "copyText", true)
         soundCues = PluginService.loadPluginData(whispererId, "soundCues", true)
+        initialPrompt = PluginService.loadPluginData(whispererId, "initialPrompt", "")
         customWords = PluginService.loadPluginData(whispererId, "customWords", [])
         snippets = PluginService.loadPluginData(whispererId, "snippets", [])
         aiProvider = PluginService.loadPluginData(whispererId, "aiProvider", "openrouter")
@@ -1220,6 +1219,8 @@ PluginComponent {
         if (words.length > 0)
             p += "\n\nThe speaker often uses these terms; use these exact spellings when you hear them: "
                + words.join(", ") + "."
+        if (initialPrompt.trim().length > 0)
+            p += "\n\nContext for this dictation: " + initialPrompt.trim()
         if (aiStyle.trim().length > 0)
             p += "\n\nAdditional style instructions: " + aiStyle.trim()
         return p
