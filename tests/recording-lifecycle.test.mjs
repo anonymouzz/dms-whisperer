@@ -9,6 +9,13 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import vm from 'node:vm';
+import {
+    WHISPER_LANGS,
+    formatVocabPrompt,
+    normalizeLanguageCode,
+    languageLabel,
+    buildLanguageOptions,
+} from '../whisper-prompt.mjs';
 
 const source = readFileSync(new URL('../Whisperer.qml', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../WhispererSettings.qml', import.meta.url), 'utf8');
@@ -21,6 +28,10 @@ function harness() {
         serverUrl: 'http://127.0.0.1:8910', activeAiKey: 'test-key',
         aiSession: false, sttState: 'idle', overlayActive: false,
         history: [], copyText: false, typeText: false,
+        initialPrompt: '', customWords: [], snippets: [], aiStyle: '',
+        whisperUseGpu: false, translateToEnglish: false, transcribeThreads: 4,
+        language: 'en', recordingPath: '/runtime/recording.wav', vocabPrompt: '',
+        WhisperPrompt: { formatVocabPrompt },
         errorResetTimer: { stop() {}, restart() {} }, doneLingerTimer: { restart() {} },
         playCue() {}, checkPreflight() {}, pushHistory() {},
         recorder: { running: false, signal() {} }, transcriber: { running: false }, restoreMedia() {},
@@ -30,7 +41,9 @@ function harness() {
     context.root = context;
     for (const name of ['levelMonitorCommand', 'cleanupSession', 'removeSessionDirectory', 'checkRecordingReady',
         'startRecording', 'cancelRecording', 'finishCancel', 'deliver', 'noSpeech',
-        'fail', 'enterAiError', 'cancelAiError', 'fallbackToLocal', 'checkPreflight', 'fasterWhisperCommand', 'duckMedia', 'restoreMedia', 'ensureAecModule']) {
+        'fail', 'enterAiError', 'cancelAiError', 'fallbackToLocal', 'checkPreflight', 'vocabWords',
+        'whisperCppCommand', 'fasterWhisperCommand', 'whisperServerCommand', 'aiSystemPrompt',
+        'duckMedia', 'restoreMedia', 'ensureAecModule']) {
         const match = source.match(new RegExp(`^    function ${name}\\([^]*?^    }`, 'm'));
         assert.ok(match, `missing QML function ${name}`);
         vm.runInContext(match[0], context);
@@ -315,3 +328,157 @@ else fs.writeFileSync(args.at(-1), pcm);
         });
     }
 }
+
+test('formatVocabPrompt handles ASCII, CJK, and ellipsis punctuation without prefixes', () => {
+    const { context: c } = harness();
+    assert.equal(formatVocabPrompt('', []), '');
+
+    c.customWords = [{ word: 'Wayfire' }, 'Quickshell'];
+    c.snippets = [{ trigger: 'sign off' }];
+    assert.equal(formatVocabPrompt('', c.vocabWords()), 'Wayfire, Quickshell, sign off.');
+
+    assert.equal(formatVocabPrompt('  Context text.  ', []), 'Context text.');
+    assert.equal(formatVocabPrompt('Context text.', c.vocabWords()), 'Context text. Wayfire, Quickshell, sign off.');
+    assert.equal(formatVocabPrompt('Context text', ['Wayfire']), 'Context text. Wayfire.');
+    assert.equal(formatVocabPrompt('Terms:', ['Wayfire']), 'Terms: Wayfire.');
+    assert.equal(formatVocabPrompt('\u30c6\u30b9\u30c8\u3002', ['Wayfire']), '\u30c6\u30b9\u30c8\u3002 Wayfire.');
+    assert.equal(formatVocabPrompt('\u4f60\u597d\uff01', ['Wayfire']), '\u4f60\u597d\uff01 Wayfire.');
+    assert.equal(formatVocabPrompt('Wait\u2026', ['Wayfire']), 'Wait\u2026 Wayfire.');
+});
+
+test('local and AI prompts both forward initialPrompt and vocabulary', () => {
+    const { context: c } = harness();
+    assert.equal(c.aiSystemPrompt().includes('Context for this dictation:'), false);
+
+    c.language = 'ja';
+    c.vocabPrompt = '';
+
+    const cppEmpty = c.whisperCppCommand();
+    assert.equal(cppEmpty[cppEmpty.indexOf('-l') + 1], 'ja');
+    assert.equal(cppEmpty.includes('--prompt'), false);
+
+    const serverEmpty = c.whisperServerCommand();
+    assert.equal(serverEmpty.includes('language=ja'), true);
+    assert.equal(serverEmpty.some(a => a.startsWith('prompt=')), false);
+
+    c.language = 'ru';
+    c.initialPrompt = '  Backend architecture notes  ';
+    c.customWords = [{ word: 'Wayfire' }];
+    c.aiStyle = 'concise';
+    c.vocabPrompt = formatVocabPrompt(c.initialPrompt, c.vocabWords());
+
+    assert.match(c.aiSystemPrompt(), /Context for this dictation: Backend architecture notes/);
+    assert.match(c.aiSystemPrompt(), /use these exact spellings when you hear them: Wayfire\./);
+    assert.match(c.aiSystemPrompt(), /Additional style instructions: concise/);
+
+    const cppWithPrompt = c.whisperCppCommand();
+    assert.equal(cppWithPrompt[cppWithPrompt.indexOf('-l') + 1], 'ru');
+    assert.equal(cppWithPrompt[cppWithPrompt.indexOf('--prompt') + 1], 'Backend architecture notes. Wayfire.');
+    assert.equal(cppWithPrompt.includes('--carry-initial-prompt'), true);
+
+    const fwCmd = c.fasterWhisperCommand().slice(5);
+    assert.equal(fwCmd[fwCmd.indexOf('--language') + 1], 'ru');
+    assert.equal(fwCmd[fwCmd.indexOf('--initial_prompt') + 1], 'Backend architecture notes. Wayfire.');
+
+    const serverWithPrompt = c.whisperServerCommand();
+    assert.equal(serverWithPrompt.includes('language=ru'), true);
+    assert.equal(serverWithPrompt.includes('prompt=Backend architecture notes. Wayfire.'), true);
+    assert.equal(serverWithPrompt.includes('carry_initial_prompt=true'), true);
+
+    c.language = 'auto';
+    const fwAuto = c.fasterWhisperCommand().slice(5);
+    assert.equal(fwAuto.includes('--language'), false);
+});
+
+test('buildLanguageOptions enforces Whisper whitelist and handles real QLocale quirks', () => {
+    assert.equal(WHISPER_LANGS.size, 100);
+    assert.equal(WHISPER_LANGS.has('yue'), true);
+    assert.equal(WHISPER_LANGS.has('haw'), true);
+    assert.equal(WHISPER_LANGS.has('eo'), false);
+    assert.equal(WHISPER_LANGS.has('ast'), false);
+
+    // Mirrors real Qt 6 QLocale on an non-English OS:
+    // - "en" maps to en_US ("American English")
+    // - empty or bogus fallback returns OS default ("ru_RU") or "C"
+    // - CLDR canonical codes ("jv", "nb", "fil") resolve to regional names
+    const cldr = {
+        en: { name: 'en_US', nativeLanguageName: 'American English' },
+        ru: { name: 'ru_RU', nativeLanguageName: 'russian' },
+        zh: { name: 'zh_CN', nativeLanguageName: 'chinese' },
+        pt: { name: 'pt_PT', nativeLanguageName: 'portugues' },
+        de: { name: 'de_DE', nativeLanguageName: 'deutsch' },
+        fr: { name: 'fr_FR', nativeLanguageName: 'french' },
+        ja: { name: 'ja_JP', nativeLanguageName: 'japanese' },
+        ka: { name: 'ka_GE', nativeLanguageName: 'georgian' },
+        uk: { name: 'uk_UA', nativeLanguageName: 'ukrainian' },
+        yue: { name: 'yue_HK', nativeLanguageName: 'cantonese' },
+        jv: { name: 'jv_ID', nativeLanguageName: 'jawa' },
+        nb: { name: 'nb_NO', nativeLanguageName: 'norsk bokmal' },
+        fil: { name: 'fil_PH', nativeLanguageName: 'filipino' },
+    };
+    const mockQtLocale = code => {
+        if (!code)
+            return { name: 'ru_RU', nativeLanguageName: 'russian' };
+        return cldr[code] || { name: 'ru_RU', nativeLanguageName: 'russian' };
+    };
+
+    assert.equal(normalizeLanguageCode('ru-RU'), 'ru');
+    assert.equal(normalizeLanguageCode('zh_CN.UTF-8'), 'zh');
+    assert.equal(normalizeLanguageCode('nb_NO.UTF-8'), 'no');
+    assert.equal(normalizeLanguageCode('fil_PH'), 'tl');
+    assert.equal(normalizeLanguageCode('jv_ID'), 'jw');
+    assert.equal(normalizeLanguageCode('yue-HK'), 'yue');
+    assert.equal(normalizeLanguageCode('C'), '');
+    assert.equal(normalizeLanguageCode('posix'), '');
+    assert.equal(normalizeLanguageCode('eo'), '');
+    assert.equal(normalizeLanguageCode('ast'), '');
+    assert.equal(normalizeLanguageCode('kab'), '');
+    assert.equal(normalizeLanguageCode('ckb'), '');
+    assert.equal(normalizeLanguageCode(null), '');
+
+    assert.equal(languageLabel('en', cldr.en, mockQtLocale), 'English (en)');
+    assert.equal(languageLabel('zz', null, mockQtLocale), 'zz');
+    assert.equal(languageLabel('zz', { name: 'C', nativeLanguageName: '' }, mockQtLocale), 'zz');
+    assert.equal(languageLabel('jw', null, mockQtLocale), 'Jawa (jw)');
+    assert.equal(languageLabel('no', null, mockQtLocale), 'Norsk bokmal (no)');
+    assert.equal(languageLabel('tl', null, mockQtLocale), 'Filipino (tl)');
+    assert.equal(languageLabel('zh', { name: 'zh_TW', nativeLanguageName: 'traditional chinese' }, mockQtLocale), 'Chinese (zh)');
+    assert.equal(languageLabel('es', { nativeLanguageName: 'espanol' }, null), 'Espanol (es)');
+    assert.equal(languageLabel('es', { nativeLanguageName: 'espanol' }, () => ({ name: 'C', nativeLanguageName: '' })), 'Espanol (es)');
+
+    const presentLocales = {
+        en: cldr.en,
+        zh_TW: { name: 'zh_TW', nativeLanguageName: 'traditional chinese' },
+        zh_CN: { name: 'zh_CN', nativeLanguageName: 'simplified chinese' },
+        pt_BR: { name: 'pt_BR', nativeLanguageName: 'portugues do brasil' },
+        es: { nativeLanguageName: 'espanol' },
+        eo: { name: 'eo_001', nativeLanguageName: 'Esperanto' },
+        ast_ES: { name: 'ast_ES', nativeLanguageName: 'asturianu' },
+        ja: cldr.ja,
+        fr: cldr.fr,
+        ru: cldr.ru,
+    };
+    const opts = buildLanguageOptions(
+        ['ru-RU', 'C', 'posix', 'ast_ES', 'zh-Hans-CN', 'nb_NO'],
+        ['de_DE', 'kab_DZ', ''],
+        presentLocales,
+        'ka',
+        mockQtLocale
+    );
+    assert.deepEqual(opts, [
+        { label: 'Auto-detect', value: 'auto' },
+        { label: 'Russian (ru)', value: 'ru' },
+        { label: 'Chinese (zh)', value: 'zh' },
+        { label: 'Norsk bokmal (no)', value: 'no' },
+        { label: 'Deutsch (de)', value: 'de' },
+        { label: 'English (en)', value: 'en' },
+        { label: 'Georgian (ka)', value: 'ka' },
+        { label: 'Espanol (es)', value: 'es' },
+        { label: 'French (fr)', value: 'fr' },
+        { label: 'Japanese (ja)', value: 'ja' },
+        { label: 'Portugues (pt)', value: 'pt' },
+    ]);
+
+    const bogusSaved = buildLanguageOptions(['uk-UA'], null, null, 'ckb', mockQtLocale);
+    assert.deepEqual(Array.from(bogusSaved, o => o.value), ['auto', 'uk', 'en']);
+});

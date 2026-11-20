@@ -5,6 +5,7 @@ import qs.Common
 import qs.Services
 import qs.Widgets
 import qs.Modules.Plugins
+import "./whisper-prompt.mjs" as WhisperPrompt
 
 PluginSettings {
     id: settingsRoot
@@ -52,6 +53,19 @@ PluginSettings {
     function loadModelWarningState() {
         curLanguage = PluginService.loadPluginData(pluginId, "language", "en")
         curTranslate = PluginService.loadPluginData(pluginId, "translateToEnglish", false)
+    }
+
+    property int i18nRevision: 0
+
+    readonly property var languageOptions: {
+        void i18nRevision
+        return WhisperPrompt.buildLanguageOptions(
+            Qt.locale().uiLanguages,
+            typeof SessionData !== "undefined" ? [SessionData.locale, SessionData.timeLocale] : [],
+            typeof I18n !== "undefined" ? I18n.presentLocales : null,
+            curLanguage,
+            code => Qt.locale(code)
+        )
     }
 
     // The local model selected for the active backend, and whether it's an
@@ -1286,6 +1300,14 @@ PluginSettings {
         }
     }
 
+    Connections {
+        target: typeof I18n !== "undefined" ? I18n : null
+        ignoreUnknownSignals: true
+        function onLocaleApplied() {
+            settingsRoot.i18nRevision++
+        }
+    }
+
     Component.onCompleted: {
         refresh()
         fwRefresh()
@@ -1504,13 +1526,7 @@ PluginSettings {
             settingKey: "language"
             label: "Language"
             description: "Anything other than English requires a multilingual model (e.g. small)"
-            options: [
-                {label: "English", value: "en"},
-                {label: "Auto-detect", value: "auto"},
-                {label: "Spanish", value: "es"},
-                {label: "French", value: "fr"},
-                {label: "German", value: "de"}
-            ]
+            options: settingsRoot.languageOptions
             defaultValue: "en"
         }
 
@@ -1662,6 +1678,14 @@ PluginSettings {
                 {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
                 {id: "text", label: "Text to type", placeholder: "Best regards,\\nDaniel", width: 300, required: true}
             ]
+        }
+
+        StringSetting {
+            settingKey: "initialPrompt"
+            label: "Initial prompt"
+            description: "Optional context for both local and AI dictation to guide terminology, punctuation, and style"
+            placeholder: "Optional context sentence or domain terms"
+            defaultValue: ""
         }
 
         ListSettingWithInput {

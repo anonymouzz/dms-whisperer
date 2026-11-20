@@ -310,13 +310,16 @@ Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
   On any API failure it falls back to local whisper so the dictation isn't lost. Keys live in the
   login keyring (via `secret-tool`), never in the settings JSON, and are passed to curl via the
   environment, never argv.
-- **Custom vocabulary**: add names, jargon, and tricky spellings in settings; they're passed to
-  whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding. Keep the
-  list to a few dozen entries — the prompt is capped at ~224 tokens and biasing weakens as it grows.
-- **Languages & translation**: pick the dictation language in settings (English, auto-detect,
-  Spanish, French, German — non-English needs a multilingual model), and optionally translate the
-  output to English: locally via whisper's translate task (`-tr`), and in AI mode the model is
-  instructed to translate instead of preserving the spoken language.
+- **Initial prompt & custom vocabulary**: set an optional initial prompt and add names, jargon, or
+  tricky spellings in settings; both bias local whisper (`--prompt` + `--carry-initial-prompt` or
+  `--initial_prompt`, with no hardcoded prefix) and are included in the AI dictation prompt. Keep
+  the list to a few dozen entries — the prompt is capped at ~224 tokens and biasing weakens as it
+  grows.
+- **Languages & translation**: pick auto-detect or a Whisper-supported language derived from your
+  system/DMS locales and DMS's bundled translations in settings (non-English needs a multilingual
+  model), and optionally translate the output to English: locally via whisper's translate task
+  (`-tr`), and in AI mode the model is instructed to translate instead of preserving the spoken
+  language.
 - **Backend tuning**: under the local-backend picker, a **CPU threads** slider (drives
   whisper.cpp `-t` and faster-whisper `--threads`, with its maximum capped to the machine's
   thread count) and, for whisper.cpp, a **Use GPU (Vulkan/CUDA)** toggle. The toggle only
